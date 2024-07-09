@@ -1,15 +1,149 @@
-# python assignment i/o comparator // made by emre tahtalı
+# hu cs&ai python and java assignment i/o comparator // made by emre tahtalı in 2024
 # anyone can modify this program according to their needs and publish it, but please give attribution.
 
-import sys, os, subprocess, shutil, glob
-from tkinter import messagebox
+import os
+import sys
+import webbrowser
+
 import customtkinter as ct
+from pyglet.resource import get_settings_path
+from tkinter import messagebox
+from PIL import Image
 from paramiko import SSHClient
 from scp import SCPClient
 
-ct_inputs, ct_outputs, ct_codefile, ct_username, ct_password, ct_start, ct_end, ct_language, ct_additional, ct_remember, ct_keepfiles, client, root = (None,) * 13
+ct_mainfolder, ct_inputs, ct_outputs, ct_codefile, ct_username, ct_password, ct_start, ct_end, ct_language, ct_additional, ct_remember, ct_keepfiles, client, root = (None for _ in range(14))
 error = user_output_str = given_output_str = ""
 ct_return = []
+
+
+def connect_and_execute():
+    global ct_mainfolder, ct_inputs, ct_outputs, ct_codefile, ct_username, ct_password, ct_start, ct_end, ct_language, ct_additional, ct_remember, ct_keepfiles, client, error, user_output_str, given_output_str, root
+
+    local_path = ct_mainfolder.get()
+    codefile = ct_codefile.get()
+    inputs = ct_inputs.get().split()
+    given_outputs = ct_outputs.get().split()
+    username = ct_username.get()
+    password = ct_password.get()
+    language = ct_language.get()
+    remember = ct_remember.get()
+    keepfiles = ct_keepfiles.get()
+    start = ct_start.get()
+    end = ct_end.get()
+
+    # exit if there is missing info
+    if not (local_path and codefile and given_outputs and username and password):
+        messagebox.showerror("missing data", "please fill all the necessary boxes.")
+        error = "escape"
+        return
+
+    user_outputs = [f"output{i}.txt" for i in range(len(given_outputs))]
+
+    # constants
+    MAIN_FLD = "__comparator__"
+    TRASH = "trash"
+
+    # save settings if remember is checked
+    if remember:
+        SAVE_FLD = get_settings_path("HUCSAI PA Comparator")
+        if not os.path.exists(SAVE_FLD):
+            os.mkdir(SAVE_FLD)
+
+        with open(f"{SAVE_FLD}\\settings.txt", "w") as f:
+            f.write("\n".join(map(str, (local_path, codefile, ct_inputs.get(), ct_outputs.get(), username, language, remember, keepfiles, start, end))))
+
+    else:
+        SAVE_FILE = get_settings_path("HUCSAI PA Comparator\\settings.txt")
+        if os.path.isfile(SAVE_FILE):
+            os.remove(SAVE_FILE)
+
+    # connect
+    client = SSHClient()
+    client.load_system_host_keys()
+    client.connect('dev.cs.hacettepe.edu.tr', username=username, password=password)
+
+    # create main folder for comparator if it doesn't exist
+    if not folder_exists(MAIN_FLD): run_command("mkdir " + MAIN_FLD)
+
+    # folder name is changed if a folder with same name already exists
+    folder_orig_name = local_path.split("\\")[-1]
+    if folder_exists(MAIN_FLD + "/" + folder_orig_name):
+        count = 1
+        while True:
+            folder_name = f"{folder_orig_name}_{str(count)}"
+            if not folder_exists(MAIN_FLD + "/" + folder_name): break
+            count += 1
+    else: folder_name = folder_orig_name
+
+    PATH = MAIN_FLD + "/" + folder_name
+
+    # send current folder using scp
+    scp = SCPClient(client.get_transport())
+    scp.put(local_path, recursive=True, remote_path=PATH)
+    scp.close()
+
+    # make a trash directory to dump the outputs of the program to be deleted later
+    run_command(f"mkdir '{PATH}/{TRASH}'")
+
+    error = user_output_str = given_output_str = ""
+
+    # compile if java
+    if language == "java":
+        dir_list = run_command(f"ls '{PATH}'")[0].split("\n")
+        dir_list = filter(lambda i: ".java" in i, dir_list)
+
+        command = run_command(f"cd '{PATH}';javac8 {' '.join(dir_list)}")
+
+        if command[2] != 0:
+            got_error(f"an error occurred while compiling the code.\n\n{command[1]}", PATH)
+            return
+
+    count = int(start) if start != "" else 1
+    while os.path.isfile(local_path + "/io/" + inputs[0].format(count)):
+        # break if limit exists and is reached
+        if end != "" and count > int(end): break
+
+        # run the given python file
+        run_str = f"cd '{PATH}';"
+        run_str += f"python3 '{codefile}'" if language == "python" else f"java8 '{codefile.strip('.java')}'"
+        run_str += "".join([f" 'io/{i.format(count)}'" for i in inputs])
+        run_str += "".join([f" '{TRASH}/{i}'" for i in user_outputs])
+
+        command = run_command(run_str)
+        if command[2] != 0:
+            got_error(f"an error occurred while executing input {count}.\n\n{command[1]}", PATH)
+            return
+
+        # compare every output with the given outputs
+        for i in range(len(given_outputs)):
+            # get the texts
+            user_output = run_command(f"cat '{PATH}/{TRASH}/{user_outputs[i]}'")[0]
+            given_output = run_command(f"cat '{PATH}/io/{given_outputs[i].format(count)}'")[0]
+
+            # compare and write the outcome
+            dashes = "\n" + 60 * "-" + "\n"
+
+            if user_output == given_output:
+                user_output_str += f"{dashes}{given_outputs[i].format(count)}: identical."
+                given_output_str += f"{dashes}{given_outputs[i].format(count)}: identical."
+            else:
+                user_output_str += f"{dashes}{given_outputs[i].format(count)}: difference found:{dashes}{user_output}"
+                given_output_str += f"{dashes}{given_outputs[i].format(count)}: difference found:{dashes}{given_output}"
+
+        count += 1
+
+    # last touches to the outputs
+    user_output_str += "\n" + 60 * "-"
+    given_output_str += "\n" + 60 * "-"
+    user_output_str = user_output_str.strip("\n")
+    given_output_str = given_output_str.strip("\n")
+
+    # delete the files from ssh if not wanted
+    if keepfiles: run_command(f"rm -r '{PATH}/{TRASH}'")
+    else: run_command(f"rm -r '{PATH}'")
+
+    client.close()
 
 
 def run():
@@ -29,7 +163,7 @@ def run_command(command):
     global client
 
     stdin, stdout, stderr = client.exec_command(command)
-    out, err, exit_stat = stdout.read(), stderr.read().decode("utf8"), stdout.channel.recv_exit_status()
+    out, err, exit_stat = stdout.read().decode("utf8"), stderr.read().decode("utf8"), stdout.channel.recv_exit_status()
     stdin.close(); stdout.close(); stderr.close()
 
     return out, err, exit_stat
@@ -45,7 +179,7 @@ def folder_exists(path):
 
     else: command = run_command(f"ls")
 
-    dir_list = command[0].decode("utf8").split("\n")
+    dir_list = command[0].split("\n")
     return path in dir_list
 
 
@@ -57,142 +191,27 @@ def got_error(text, path):
     client.close()
 
 
-def connect_and_execute():
-    global ct_inputs, ct_outputs, ct_codefile, ct_username, ct_password, ct_start, ct_end, ct_language, ct_additional, ct_remember, ct_keepfiles, client, error, user_output_str, given_output_str, root
-
-    codefile = ct_codefile.get()
-    inputs = ct_inputs.get().split()
-    given_outputs = ct_outputs.get().split()
-    username = ct_username.get()
-    password = ct_password.get()
-    language = ct_language.get()
-    keepfiles = ct_keepfiles.get()
-    start = ct_start.get()
-    end = ct_end.get()
-
-    # for debug
-    codefile = "main.py"
-    inputs = ["i{}.txt"]
-    given_outputs = ["o{}.txt"]
-    username = "b2230356027"
-    password = "Emrys22hacet+"
-
-    # exit if there is missing info
-    if not (codefile and given_outputs and username and password):
-        messagebox.showerror("missing data", "please fill all the necessary boxes.")
-        error = "escape"
-        return
-
-    user_outputs = [f"output{i}.txt" for i in range(len(given_outputs))]
-
-    # constants
-    MAIN_FLD = "__comparator__"
-    TRASH = "trash"
-    LOCALPATH = os.path.dirname(os.path.realpath(__file__))
-
-    # connect
-    client = SSHClient()
-    client.load_system_host_keys()
-    client.connect('dev.cs.hacettepe.edu.tr', username=username, password=password)
-
-    # create main folder for comparator if it doesn't exist
-    if not folder_exists(MAIN_FLD): run_command("mkdir " + MAIN_FLD)
-
-    # folder name is changed if a folder with same name already exists
-    folder_orig_name = LOCALPATH.split("\\")[-1]
-    if folder_exists(MAIN_FLD + "/" + folder_orig_name):
-        count = 1
-        while True:
-            folder_name = f"{folder_orig_name}_{str(count)}"
-            if not folder_exists(MAIN_FLD + "/" + folder_name): break
-            count += 1
-    else: folder_name = folder_orig_name
-
-    PATH = MAIN_FLD + "/" + folder_name
-
-    # send current folder using scp
-    scp = SCPClient(client.get_transport())
-    scp.put(LOCALPATH, recursive=True, remote_path=PATH)
-    scp.close()
-
-    # make a trash directory to dump the outputs of the program to be deleted later
-    run_command(f"mkdir '{PATH}/{TRASH}'")
-
-    error = user_output_str = given_output_str = ""
-
-    # compile if java
-    if language == "java":
-        command = run_command(f"javac8 '{PATH}/{codefile}'")
-
-        if command[2] != 0:
-            got_error("an error occurred compiling the code.", PATH)
-            return
-
-    count = int(start) if start != "" else 1
-    # while os.path.isfile("io/" + inputs[0].format(count)):
-
-    txt1 = inputs[0].format(count)
-    txt2 = run_command(f"cd '{PATH}/io';ls '{inputs[0].format(count)}'")[0].decode("utf8")
-    print(txt1)
-    print(txt2)
-    print(str(txt1 == txt2))
-
-    # print("", str(inputs[0].format(count) == run_command(f"cd '{PATH}/io';ls '{inputs[0].format(count)}'")[0].decode("utf8")))
-    while run_command(f"cd '{PATH}/io';ls '{inputs[0].format(count)}'")[0].decode("utf8") == inputs[0].format(count):
-        messagebox.showinfo("", "reached")
-        # break if limit exists and is reached
-        if end != "" and count > int(end): break
-
-        # run the given python file
-        run_str = f"cd '{PATH}';"
-        run_str += f"python3 '{codefile}'" if language == "python" else f"java8 '{codefile.strip('.java')}'"
-        run_str += "".join([f" 'io/{i.format(count)}'" for i in inputs])
-        run_str += "".join([f" '{TRASH}/{i}'" for i in user_outputs])
-
-        command = run_command(run_str)
-        if command[2] != 0:
-            got_error(f"an error occurred while executing input {count}.\n\n{command[1]}", PATH)
-            return
-
-        # compare every output with the given outputs
-        for i in range(len(given_outputs)):
-            # get the texts
-            user_output = run_command(f"cat '{PATH}/{TRASH}/{user_outputs[i]}'")[0]
-            given_output = run_command(f"cat '{PATH}/io/{user_outputs[i].format(count)}'")[0]
-
-            # compare and write the outcome
-            dashes = "\n" + 60 * "-" + "\n"
-
-            if user_output == given_output:
-                user_output_str += f"{dashes}{given_outputs[i].format(count)}: identical."
-                given_output_str += f"{dashes}{given_outputs[i].format(count)}: identical."
-            else:
-                user_output_str += f"{dashes}{given_outputs[i].format(i)}: difference found:\n{user_output}"
-                given_output_str += f"{dashes}{given_outputs[i].format(i)}: difference found:\n{given_output}"
-
-        count += 1
-
-    # delete the files from ssh if not wanted
-    """if keepfiles:
-        if folder_exists(f"'{PATH}/{TRASH}'"): run_command(f"rm -r '{PATH}/{TRASH}'")
-
-        file_exists = not run_command(f"ls '{PATH}/{__file__}'")[2]
-        if file_exists: run_command(f"rm '{PATH}/{__file__}'")
-    else:
-        run_command(f"rm -r '{PATH}'")"""
-
-    client.close()
+def resource(relative_path):
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
 
 
-def input_line(master, text, example):
-    frame = ct.CTkFrame(master=master, fg_color=ct.ThemeManager.theme["CTkFrame"]["fg_color"])
-    frame.pack(padx=50, fill="both", expand=True)
+def header_watermark(root, hover_theme):
+    # watermark elements
+    header = ct.CTkFrame(master=root, fg_color=ct.ThemeManager.theme["CTkLabel"]["fg_color"])
+    header.pack(pady=(2, 0), padx=0, fill="x", expand=False)
 
-    ct.CTkLabel(master=frame, text=text).pack(pady=12, padx=10, side=ct.LEFT)
+    image = ct.CTkImage(light_image=Image.open(resource("github-logo.png")), dark_image=Image.open(resource("github-logo.png")))
+    button = ct.CTkButton(master=header, text="github", fg_color=ct.ThemeManager.theme["CTkLabel"]["fg_color"], width=0, image=image,
+                          hover_color=ct.ThemeManager.theme[hover_theme]["fg_color"], font=("Arial", 14, "italic"), text_color="#595959",
+                          command=(lambda: webbrowser.open_new_tab("https://github.com/emretahtali/hucsai-pa-comparator")))
+    button.pack(padx=(0, 10), side=ct.RIGHT)
 
-    ct_item = ct.CTkEntry(master=frame, placeholder_text=example)
-    ct_item.pack(pady=12, padx=10, fill="x", expand=True, side=ct.RIGHT)
-    return ct_item
+    button = ct.CTkButton(master=header, text="emre tahtalı 2024",
+                          fg_color=ct.ThemeManager.theme["CTkLabel"]["fg_color"], width=0, text_color="#595959",
+                          hover_color=ct.ThemeManager.theme[hover_theme]["fg_color"], font=("Arial", 14, "italic"),
+                          command=(lambda: webbrowser.open_new_tab("https://github.com/emretahtali")))
+    button.pack(padx=0, side=ct.RIGHT)
 
 
 def open_res_win():
@@ -201,15 +220,15 @@ def open_res_win():
     # creating the window
     res_window = ct.CTkToplevel(root)
     res_window.geometry("1200x600")
-
     res_window.title("comparator results")
+    header_watermark(res_window, "CTkEntry")
 
     # title
     title_frame = ct.CTkFrame(master=res_window)
-    title_frame.pack(pady=(40, 20), padx=40, fill="x")
+    title_frame.pack(pady=(20, 20), padx=40, fill="x")
     ct.CTkLabel(master=title_frame, text="comparator results", font=("Arial", 16, "bold")).pack(pady=12, padx=10)
 
-    # error = "IndentationError: unindent does not match any outer indentation level\nosman"
+    # show error screen if there is any
     if error != "":
         txt_frame = ct.CTkFrame(master=res_window)
         txt_frame.pack(pady=(20, 40), padx=40, fill="both", expand=True)
@@ -254,27 +273,46 @@ def open_res_win():
         txt_box.insert("end", user_output_str)
 
 
-def main():
-    global ct_inputs, ct_outputs, ct_codefile, ct_username, ct_password, ct_start, ct_end, ct_language, ct_additional, ct_remember, ct_keepfiles, error, user_output_str, given_output_str, root
+def input_line(master, text, example, default_text):
+    frame = ct.CTkFrame(master=master, fg_color=ct.ThemeManager.theme["CTkFrame"]["fg_color"])
+    frame.pack(padx=50, fill="both", expand=True)
 
+    ct.CTkLabel(master=frame, text=text).pack(pady=12, padx=10, side=ct.LEFT)
+
+    ct_item = ct.CTkEntry(master=frame, placeholder_text=example)
+    if default_text != "": ct_item.insert(ct.END, default_text)
+    ct_item.pack(pady=12, padx=10, fill="x", expand=True, side=ct.RIGHT)
+    return ct_item
+
+
+def main_screen(saved_settings):
+    global ct_mainfolder, ct_inputs, ct_outputs, ct_codefile, ct_username, ct_password, ct_start, ct_end, ct_language, ct_additional, ct_remember, ct_keepfiles, error, user_output_str, given_output_str, root
+
+    # set the scene up
     root = ct.CTk()
-    root.geometry("500x672")
+    root.geometry("500x738")
     root.title("comparator")
 
     ct.set_appearance_mode("dark")
     ct.set_default_color_theme("dark-blue")
+    header_watermark(root, "CTk")
 
-    frame = ct.CTkFrame(master=root)
-    frame.pack(pady=20, padx=40, fill="x", expand=True)
+    # main frame
+    main_frame = ct.CTkFrame(master=root, fg_color=ct.ThemeManager.theme["CTkLabel"]["fg_color"])
+    main_frame.pack(pady=(2, 0), padx=0, fill="both", expand=True)
+
+    frame = ct.CTkFrame(master=main_frame)
+    frame.pack(pady=(0, 20), padx=40, fill="x", expand=True)
 
     label = ct.CTkLabel(master=frame, text="comparator", font=("Arial", 16, "bold"))
     label.pack(pady=(24, 12), padx=10)
 
-    #inputs
-    ct_codefile = input_line(frame, "code file name:", "helloworld.py")
-    ct_inputs = input_line(frame, "inputs:", "product_{}.txt purchase_{}.txt")
-    ct_outputs = input_line(frame, "outputs:", "output{}.txt")
-    ct_username = input_line(frame, "username:", "b<student id>")
+    # inputs
+    ct_mainfolder = input_line(frame, "folder path:", "C:\\Users\\user\\Desktop\\somefolder", saved_settings[0])
+    ct_codefile = input_line(frame, "main file name:", "helloworld.py", saved_settings[1])
+    ct_inputs = input_line(frame, "inputs:", "product_{}.txt purchase_{}.txt", saved_settings[2])
+    ct_outputs = input_line(frame, "outputs:", "output{}.txt", saved_settings[3])
+    ct_username = input_line(frame, "username:", "b<student id>", saved_settings[4])
 
     # password
     password_frame = ct.CTkFrame(master=frame, fg_color=ct.ThemeManager.theme["CTkFrame"]["fg_color"])
@@ -289,7 +327,13 @@ def main():
     run_frame = ct.CTkFrame(master=frame, fg_color=ct.ThemeManager.theme["CTkFrame"]["fg_color"])
     run_frame.pack(padx=50, fill="both", expand=True)
 
-    ct_language = ct.CTkOptionMenu(master=run_frame, values=["python", "java"])
+    if saved_settings[5] != "":
+        ct_language_def = ct.StringVar()
+        ct_language_def.set(saved_settings[5])
+        ct_language = ct.CTkOptionMenu(master=run_frame, values=["python", "java"], variable=ct_language_def)
+    else:
+        ct_language = ct.CTkOptionMenu(master=run_frame, values=["python", "java"])
+
     ct_language.pack(pady=12, padx=10, fill="x", expand=True, side=ct.LEFT)
 
     run_button = ct.CTkButton(master=run_frame, text="run", command=run)
@@ -303,21 +347,32 @@ def main():
     checkbox_frame = ct.CTkFrame(master=frame, fg_color=ct.ThemeManager.theme["CTkFrame"]["fg_color"])
     checkbox_frame.pack(pady=(0, 12), padx=50, fill="both", expand=True)
 
-    ct_additional = ct.CTkCheckBox(master=checkbox_frame, text="additional options", command=additional_button)
+    ct_additional = ct.CTkCheckBox(master=checkbox_frame, text="additional settings", command=additional_button)
     ct_additional.pack(pady=12, padx=10, side=ct.LEFT)
 
-    # TODO: add remember functionality
-    ct_remember = ct.CTkCheckBox(master=checkbox_frame, text="remember settings")
+    if saved_settings[6] != "":
+        ct_remember_def = ct.IntVar()
+        ct_remember_def.set(int(saved_settings[6]))
+        ct_remember = ct.CTkCheckBox(master=checkbox_frame, text="remember settings", variable=ct_remember_def)
+    else:
+        ct_remember = ct.CTkCheckBox(master=checkbox_frame, text="remember settings")
+
     ct_remember.pack(pady=12, padx=10, side=ct.RIGHT)
 
-    # additional options
-    additional_frame = ct.CTkFrame(master=root)
+    # additional settings
+    additional_frame = ct.CTkFrame(master=main_frame)
 
     # ask for keeping the files
     keep_frame = ct.CTkFrame(master=additional_frame, fg_color=ct.ThemeManager.theme["CTkFrame"]["fg_color"])
     keep_frame.pack(pady=(12, 0), padx=50, fill="both", expand=True)
 
-    ct_keepfiles = ct.CTkCheckBox(master=keep_frame, text="keep the files in remote")
+    if saved_settings[7] != "":
+        ct_keepfiles_def = ct.IntVar()
+        ct_keepfiles_def.set(int(saved_settings[7]))
+        ct_keepfiles = ct.CTkCheckBox(master=keep_frame, text="keep the files in remote", variable=ct_keepfiles_def)
+    else:
+        ct_keepfiles = ct.CTkCheckBox(master=keep_frame, text="keep the files in remote")
+
     ct_keepfiles.pack(pady=12, padx=10, side=ct.LEFT)
 
     # start index
@@ -327,6 +382,7 @@ def main():
     ct.CTkLabel(master=start_frame, text="start index:").pack(pady=12, padx=10, side=ct.LEFT)
 
     ct_start = ct.CTkEntry(master=start_frame, placeholder_text="0")
+    if saved_settings[8] != "": ct_start.insert(ct.END, saved_settings[7])
     ct_start.pack(pady=12, padx=10, fill="x", expand=True, side=ct.RIGHT)
 
     # end index
@@ -336,9 +392,24 @@ def main():
     ct.CTkLabel(master=end_frame, text="end index:").pack(pady=12, padx=10, side=ct.LEFT)
 
     ct_end = ct.CTkEntry(master=end_frame, placeholder_text="10")
+    if saved_settings[9] != "": ct_end.insert(ct.END, saved_settings[8])
     ct_end.pack(pady=12, padx=10, fill="x", expand=True, side=ct.RIGHT)
 
+    # mainloop
     root.mainloop()
+
+
+def main():
+    # get saved settings
+    SAVE_FILE = get_settings_path("HUCSAI PA Comparator\\settings.txt")
+    if os.path.isfile(SAVE_FILE):
+        with open(SAVE_FILE, "r") as f:
+            saved_settings = f.read().split("\n")
+    else:
+        saved_settings = ["" for _ in range(10)]
+
+    # start the application
+    main_screen(saved_settings)
 
 
 if __name__ == "__main__": main()
